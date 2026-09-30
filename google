@@ -1,0 +1,416 @@
+import torch.nn as nn
+from typing import Dict, Type
+
+class ModelRegistry:
+    def __init__(self):
+        self._registry: Dict[str, Type[nn.Module]] = {}
+
+    def register(self, name: str):
+        """Decorator to register a model architecture class."""
+        def decorator(cls: Type[nn.Module]):
+            if name in self._registry:
+                raise ValueError(f"Model '{name}' is already registered!")
+            self._registry[name] = cls
+            return cls
+        return decorator
+
+    def get(self, name: str) -> Type[nn.Module]:
+        """Retrieve a model class by name."""
+        if name not in self._registry:
+            raise KeyError(f"Model '{name}' not found in registry. Available: {list(self._registry.keys())}")
+        return self._registry[name]
+
+# Global registry instance
+MODEL_REGISTRY = ModelRegistry()import torch
+import torch.nn as nn
+from registry import MODEL_REGISTRY
+
+@MODEL_REGISTRY.register("mlp")
+class FlexibleMLP(nn.Module):
+    def __init__(self, input_dim: int, hidden_dim: int, output_dim: int, num_layers: int = 2, dropout: float = 0.1):
+        super().__init__()
+        layers = []
+        curr_dim = input_dim
+        
+        for _ in range(num_layers - 1):
+            layers.append(nn.Linear(curr_dim, hidden_dim))
+            layers.append(nn.ReLU())
+            layers.append(nn.Dropout(dropout))
+            curr_dim = hidden_dim
+            
+        layers.append(nn.Linear(curr_dim, output_dim))
+        self.network = nn.Sequential(*layers)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.network(x)
+
+
+@MODEL_REGISTRY.register("custom_cnn")
+class SimpleCNN(nn.Module):
+    def __init__(self, in_channels: int = 3, num_classes: int = 10):
+        super().__init__()
+        self.features = nn.Sequential(
+            nn.Conv2d(in_channels, 32, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2),
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool2d((1, 1))
+        )
+        self.classifier = nn.Linear(64, num_classes)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.features(x)
+        x = torch.flatten(x, 1)
+        return self.classifier(x)from typing import Dict, Any
+import torch.nn as nn
+from registry import MODEL_REGISTRY
+import models  # Imports models to trigger decorator registration
+
+def build_model(config: Dict[str, Any]) -> nn.Module:
+    """
+    Builds and returns a PyTorch model based on the provided configuration dictionary.
+    
+    Example config:
+    {
+        "architecture": "mlp",
+        "params": {
+            "input_dim": 784,
+            "hidden_dim": 256,
+            "output_dim": 10,
+            "num_layers": 3
+        }
+    }
+    """
+    arch_name = config.get("architecture")
+    if not arch_name:
+        raise ValueError("Config must specify an 'architecture' key.")
+        
+    model_cls = MODEL_REGISTRY.get(arch_name)
+    params = config.get("params", {})
+    
+    # Instantiate the model with the specified parameters
+    model = model_cls(**params)
+    return modelfrom factory import build_model
+import torch
+
+if __name__ == "__main__":
+    # Simulated configuration from Epic 1 specifications
+    config = {
+        "architecture": "mlp",
+        "params": {
+            "input_dim": 128,
+            "hidden_dim": 64,
+            "output_dim": 2,
+            "num_layers": 3,
+            "dropout": 0.2
+        }
+    }
+
+    # Instantiate model cleanly via factory
+    model = build_model(config)
+    print(f"Successfully built model: {type(model).__name__}")
+    
+    # Test forward pass with dummy data
+    dummy_input = torch.randn(16, 128)
+    output = model(dummy_input)
+    print(f"Output shape: {output.shape}")import os
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader
+from typing import Tuple, Dict, Any
+
+class Trainer:
+    def __init__(
+        self,
+        model: nn.Module,
+        optimizer: torch.optim.Optimizer,
+        criterion: nn.Module,
+        device: torch.device,
+        checkpoint_dir: str = "./checkpoints"
+    ):
+        self.model = model.to(device)
+        self.optimizer = optimizer
+        self.criterion = criterion
+        self.device = device
+        self.checkpoint_dir = checkpoint_dir
+        
+        # Ensure checkpoint directory exists
+        os.makedirs(self.checkpoint_dir, exist_ok=True)
+        
+    def train_epoch(self, dataloader: DataLoader) -> float:
+        """Runs a single training epoch and returns the average loss."""
+        self.model.train()
+        total_loss = 0.0
+        
+        for inputs, targets in dataloader:
+            inputs, targets = inputs.to(self.device), targets.to(self.device)
+            
+            # Forward pass
+            self.optimizer.zero_grad()
+            outputs = self.model(inputs)
+            loss = self.criterion(outputs, targets)
+            
+            # Backward pass & optimization
+            loss.backward()
+            self.optimizer.step()
+            
+            total_loss += loss.item()
+            
+        return total_loss / len(dataloader)
+
+    @torch.no_grad()
+    def evaluate(self, dataloader: DataLoader) -> Tuple[float, float]:
+        """Evaluates the model on validation data, returning loss and accuracy."""
+        self.model.eval()
+        total_loss = 0.0
+        correct = 0
+        total = 0
+        
+        for inputs, targets in dataloader:
+            inputs, targets = inputs.to(self.device), targets.to(self.device)
+            outputs = self.model(inputs)
+            loss = self.criterion(outputs, targets)
+            
+            total_loss += loss.item()
+            
+            # Compute classification accuracy
+            _, predicted = outputs.max(1)
+            total += targets.size(0)
+            correct += predicted.eq(targets).sum().item()
+            
+        val_loss = total_loss / len(dataloader)
+        accuracy = correct / total if total > 0 else 0.0
+        return val_loss, accuracy
+
+    def save_checkpoint(self, filename: str, epoch: int, val_loss: float):
+        """Saves model weights and optimizer state to disk."""
+        path = os.path.join(self.checkpoint_dir, filename)
+        checkpoint = {
+            'epoch': epoch,
+            'model_state_dict': self.model.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'val_loss': val_loss
+        }
+        torch.save(checkpoint, path)
+        print(f"-> Checkpoint saved successfully at: {path}")
+
+    def fit(self, train_loader: DataLoader, val_loader: DataLoader, epochs: int):
+        """Executes the full training and validation lifecycle."""
+        best_val_loss = float('inf')
+        
+        for epoch in range(1, epochs + 1):
+            train_loss = self.train_epoch(train_loader)
+            val_loss, val_acc = self.evaluate(val_loader)
+            
+            print(f"Epoch [{epoch}/{epochs}] | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | Val Acc: {val_acc * 100:.2f}%")
+            
+            # Save the best model checkpoint based on validation loss
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                self.save_checkpoint("best_model.pt", epoch, val_loss)import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import TensorDataset, DataLoader
+
+# Import Epic 1 components
+from factory import build_model
+# Import Epic 2 components
+from trainer import Trainer
+
+if __name__ == "__main__":
+    # 1. Setup device
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using compute device: {device}")
+
+    # 2. Build model using Epic 1 Model Factory configuration
+    config = {
+        "architecture": "mlp",
+        "params": {
+            "input_dim": 128,
+            "hidden_dim": 64,
+            "output_dim": 2,
+            "num_layers": 3,
+            "dropout": 0.1
+        }
+    }
+    model = build_model(config)
+
+    # 3. Generate sample synthetic data for pipeline verification
+    # Training set
+    X_train = torch.randn(1000, 128)
+    y_train = torch.randint(0, 2, (1000,))
+    train_dataset = TensorDataset(X_train, y_train)
+    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+
+    # Validation set
+    X_val = torch.randn(200, 128)
+    y_val = torch.randint(0, 2, (200,))
+    val_dataset = TensorDataset(X_val, y_val)
+    val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False)
+
+    # 4. Define core optimization primitives
+    optimizer = optim.Adam(model.parameters(), lr=0.001)
+    criterion = nn.CrossEntropyLoss()
+
+    # 5. Initialize the Epic 2 Trainer and run fitting
+    trainer = Trainer(
+        model=model,
+        optimizer=optimizer,
+        criterion=criterion,
+        device=device,
+        checkpoint_dir="./checkpoints"
+    )
+
+    print("\nStarting Epic 2 Training Pipeline...")
+    trainer.fit(train_loader, val_loader, epochs=5)import pytest
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import TensorDataset, DataLoader
+
+# Import components from Epics 1 & 2
+from factory import build_model
+from trainer import Trainer
+import models  # Triggers model registry decorators
+
+def test_model_factory_mlp():
+    """Test that the MLP architecture builds with correct shapes."""
+    config = {
+        "architecture": "mlp",
+        "params": {
+            "input_dim": 64,
+            "hidden_dim": 32,
+            "output_dim": 2,
+            "num_layers": 3
+        }
+    }
+    model = build_model(config)
+    assert isinstance(model, nn.Module)
+    
+    # Verify forward pass tensor dimensions
+    dummy_input = torch.randn(8, 64)
+    output = model(dummy_input)
+    assert output.shape == (8, 2)
+
+def test_model_factory_invalid_architecture():
+    """Test that the factory raises an error for non-existent architectures."""
+    config = {"architecture": "non_existent_model", "params": {}}
+    with pytest.raises(KeyError):
+        build_model(config)
+
+def test_trainer_execution():
+    """Test that a single training epoch runs and updates the model without crashing."""
+    config = {
+        "architecture": "mlp",
+        "params": {"input_dim": 32, "hidden_dim": 16, "output_dim": 2, "num_layers": 2}
+    }
+    model = build_model(config)
+    optimizer = optim.Adam(model.parameters(), lr=0.01)
+    criterion = nn.CrossEntropyLoss()
+    
+    # Create small dummy dataset
+    X = torch.randn(16, 32)
+    y = torch.randint(0, 2, (16,))
+    dataset = TensorDataset(X, y)
+    dataloader = DataLoader(dataset, batch_size=8)
+    
+    trainer = Trainer(
+        model=model,
+        optimizer=optimizer,
+        criterion=criterion,
+        device=torch.device("cpu"),
+        checkpoint_dir="./test_checkpoints"
+    )
+    
+    epoch_loss = trainer.train_epoch(dataloader)
+    assert isinstance(epoch_loss, float)
+    assert epoch_loss > 0.0from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, Field
+import torch
+from typing import List
+from factory import build_model
+import os
+
+app = FastAPI(
+    title="ML Model Serving API",
+    description="Production inference endpoint for Epic model architectures",
+    version="1.0.0"
+)
+
+# Global placeholders for model and device
+model = None
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+class InferenceRequest(BaseModel):
+    features: List[float] = Field(..., description="Input feature vector matching model input dimension")
+
+class InferenceResponse(BaseModel):
+    prediction: int
+    probabilities: List[float]
+
+@app.on_event("startup")
+def load_production_model():
+    global model
+    
+    # Configuration matching your trained pipeline
+    config = {
+        "architecture": "mlp",
+        "params": {
+            "input_dim": 128,
+            "hidden_dim": 64,
+            "output_dim": 2,
+            "num_layers": 3
+        }
+    }
+    
+    model = build_model(config)
+    
+    # Load best checkpoint weights if available
+    checkpoint_path = "./checkpoints/best_model.pt"
+    if os.path.exists(checkpoint_path):
+        checkpoint = torch.load(checkpoint_path, map_location=DEVICE)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        print(f"Loaded checkpoint from epoch {checkpoint['epoch']} with val_loss: {checkpoint['val_loss']:.4f}")
+    else:
+        print("Warning: No checkpoint found. Using randomly initialized model weights.")
+        
+    model.to(DEVICE)
+    model.eval()
+
+@app.post("/predict", response_model=InferenceResponse)
+def predict(payload: InferenceRequest):
+    if len(payload.features) != 128:
+        raise HTTPException(status_code=400, detail="Invalid input dimension. Expected 128 features.")
+    
+    with torch.no_grad():
+        tensor_input = torch.tensor([payload.features], dtype=torch.float32).to(DEVICE)
+        logits = model(tensor_input)
+        probabilities = torch.softmax(logits, dim=1).squeeze().tolist()
+        prediction = torch.argmax(logits, dim=1).item()
+        
+    return InferenceResponse(
+        prediction=prediction,
+        probabilities=probabilities if isinstance(probabilities, list) else [probabilities]
+    )
+
+@app.get("/health")
+def health_check():
+    return {"status": "healthy", "device": str(DEVICE)}FROM python:3.9-slim
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential && rm -rf /var/lib/apt/lists/*
+
+# Install python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy source code and checkpoints
+COPY . .
+
+EXPOSE 8000
+
+# Run FastAPI via Uvicorn server
+CMD ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000"]
